@@ -1,0 +1,138 @@
+name: ML CI/CD
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write        # push image to GHCR
+  pull-requests: write   # CML comment on PR
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------- 1. CI: reproduce pipeline, test, CML report ----------
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0               # needed for "dvc metrics diff main"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Reproduce pipeline (DVC + MLflow)
+        run: dvc repro -f
+
+      - name: Run tests
+        run: pytest -v
+
+      - name: Accuracy gate (fail if model is too weak)
+        run: |
+          python -c "import json,sys; m=json.load(open('metrics.json')); print(m); sys.exit(0 if m['accuracy']>=0.90 else 1)"
+
+      - uses: iterative/setup-cml@v2
+        if: github.event_name == 'pull_request'
+
+      - name: Post CML metrics report on PR
+        if: github.event_name == 'pull_request'
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git fetch origin main
+          echo "## Model metrics" > report.md
+          cat metrics.json >> report.md
+          echo -e "\n## Metrics diff vs main" >> report.md
+          dvc metrics diff origin/main --md >> report.md
+          echo -e "\n## Params diff vs main" >> report.md
+          dvc params diff origin/main --md >> report.md
+          cml comment create report.md
+
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model
+          path: model/model.pkl
+
+  # ---------- 2. Build & push Docker image tagged with commit SHA ----------
+  build:
+    needs: ci
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: model
+
+      - name: Set image name (lowercase)
+        id: meta
+        run: echo "image=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: MODEL_VERSION=${{ github.sha }}
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ github.sha }}
+            ${{ steps.meta.outputs.image }}:latest
+
+  # ---------- 3. CD: update Kubernetes, verify, rollback on failure ----------
+  deploy:
+    needs: build
+    runs-on: self-hosted          # runner on the machine that has kubectl + minikube
+    steps:
+      - name: Update image
+        shell: bash
+        run: |
+          kubectl set image deployment/iris-api \
+            iris-api=${{ needs.build.outputs.image }}:${{ github.sha }}
+          kubectl annotate deployment/iris-api \
+            kubernetes.io/change-cause="deploy ${{ github.sha }}" --overwrite
+
+      - name: Verify rollout (rollback if it fails)
+        shell: bash
+        run: |
+          if ! kubectl rollout status deployment/iris-api --timeout=120s; then
+            echo "Rollout failed - rolling back"
+            kubectl rollout undo deployment/iris-api
+            kubectl rollout status deployment/iris-api --timeout=120s
+            exit 1
+          fi
+
+      - name: Smoke test /health
+        shell: bash
+        run: |
+          kubectl port-forward svc/iris-api-svc 8080:80 &
+          PF_PID=$!
+          sleep 5
+          if ! curl -sf http://localhost:8080/health; then
+            echo "Health check failed - rolling back"
+            kill $PF_PID
+            kubectl rollout undo deployment/iris-api
+            exit 1
+          fi
+          kill $PF_PID
+          kubectl rollout history deployment/iris-api
