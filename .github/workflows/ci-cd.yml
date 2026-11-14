@@ -100,39 +100,39 @@ jobs:
             ${{ steps.meta.outputs.image }}:latest
 
   # ---------- 3. CD: update Kubernetes, verify, rollback on failure ----------
-  deploy:
+    deploy:
     needs: build
-    runs-on: self-hosted          # runner on the machine that has kubectl + minikube
+    runs-on: self-hosted
     steps:
       - name: Update image
-        shell: bash
+        shell: powershell
         run: |
-          kubectl set image deployment/iris-api \
-            iris-api=${{ needs.build.outputs.image }}:${{ github.sha }}
-          kubectl annotate deployment/iris-api \
-            kubernetes.io/change-cause="deploy ${{ github.sha }}" --overwrite
+          kubectl set image deployment/iris-api "iris-api=${{ needs.build.outputs.image }}:${{ github.sha }}"
+          kubectl annotate deployment/iris-api "kubernetes.io/change-cause=deploy ${{ github.sha }}" --overwrite
 
       - name: Verify rollout (rollback if it fails)
-        shell: bash
+        shell: powershell
         run: |
-          if ! kubectl rollout status deployment/iris-api --timeout=120s; then
-            echo "Rollout failed - rolling back"
+          kubectl rollout status deployment/iris-api --timeout=120s
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Rollout failed - rolling back"
             kubectl rollout undo deployment/iris-api
             kubectl rollout status deployment/iris-api --timeout=120s
             exit 1
-          fi
+          }
 
       - name: Smoke test /health
-        shell: bash
+        shell: powershell
         run: |
-          kubectl port-forward svc/iris-api-svc 8080:80 &
-          PF_PID=$!
-          sleep 5
-          if ! curl -sf http://localhost:8080/health; then
-            echo "Health check failed - rolling back"
-            kill $PF_PID
+          $pf = Start-Process kubectl -ArgumentList "port-forward svc/iris-api-svc 8080:80" -PassThru -WindowStyle Hidden
+          Start-Sleep -Seconds 5
+          try {
+            Invoke-RestMethod http://localhost:8080/health | ConvertTo-Json
+          } catch {
+            Write-Host "Health check failed - rolling back"
+            Stop-Process -Id $pf.Id
             kubectl rollout undo deployment/iris-api
             exit 1
-          fi
-          kill $PF_PID
+          }
+          Stop-Process -Id $pf.Id
           kubectl rollout history deployment/iris-api
