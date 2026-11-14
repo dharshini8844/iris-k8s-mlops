@@ -100,7 +100,7 @@ jobs:
             ${{ steps.meta.outputs.image }}:latest
 
   # ---------- 3. CD: update Kubernetes, verify, rollback on failure ----------
-    deploy:
+deploy:
     needs: build
     runs-on: self-hosted
     steps:
