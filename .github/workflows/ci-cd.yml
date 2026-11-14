@@ -100,9 +100,9 @@ jobs:
             ${{ steps.meta.outputs.image }}:latest
 
   # ---------- 3. CD: update Kubernetes, verify, rollback on failure ----------
-deploy:
+  deploy:
     needs: build
-    runs-on: self-hosted
+    runs-on: self-hosted          # runner on the laptop that has kubectl + minikube
     steps:
       - name: Update image
         shell: powershell
