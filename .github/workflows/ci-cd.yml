@@ -134,5 +134,5 @@ jobs:
             kubectl rollout undo deployment/iris-api
             exit 1
           }
-          Stop-Process -Id $pf.Id -ErrorAction SilentlyContinue -ErrorAction SilentlyContinue
+          Stop-Process -Id $pf.Id -ErrorAction SilentlyContinue
           kubectl rollout history deployment/iris-api
