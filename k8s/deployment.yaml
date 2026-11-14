@@ -23,7 +23,7 @@ spec:
       containers:
         - name: iris-api
           # CHANGE: your-github-username/your-repo (all lowercase)
-          image: ghcr.io/<your-username>/iris-k8s-mlops:latest
+          image: ghcr.io/dharshini8844/iris-k8s-mlops:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
